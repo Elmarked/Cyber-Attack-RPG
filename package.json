@@ -1,0 +1,16 @@
+{
+  "name": "cybersec-ops",
+  "private": true,
+  "version": "0.2.0",
+  "description": "Terminal-based red-vs-blue cyber incident response RPG prototype",
+  "workspaces": [
+    "frontend",
+    "server"
+  ],
+  "scripts": {
+    "install:all": "npm install --workspace server && npm install --workspace frontend",
+    "dev:server": "npm --workspace server run dev",
+    "dev:frontend": "npm --workspace frontend run dev",
+    "build:frontend": "npm --workspace frontend run build"
+  }
+}
