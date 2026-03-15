@@ -29,7 +29,9 @@ function normalizeTerminalText(text) {
     .replace(/^#{1,6}\s+/gm, '')
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/\*(.*?)\*/g, '$1')
-    .replace(/`([^`]+)`/g, '$1');
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/[{}\[\]"]+/g, (m) => (m === '"' ? '' : m))
+    .trimEnd();
 }
 
 function tryParseJson(value) {
@@ -47,55 +49,40 @@ function tryParseJson(value) {
   }
 }
 
-function ensureObject(value) {
+function deepNormalize(value) {
   const parsed = tryParseJson(value);
+  if (Array.isArray(parsed)) return parsed.map((item) => deepNormalize(item));
+  if (parsed && typeof parsed === 'object') {
+    return Object.fromEntries(Object.entries(parsed).map(([k, v]) => [k, deepNormalize(v)]));
+  }
+  return parsed;
+}
+
+function ensureObject(value) {
+  const parsed = deepNormalize(value);
   return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
 }
 
 function ensureArray(value) {
-  const parsed = tryParseJson(value);
+  const parsed = deepNormalize(value);
   return Array.isArray(parsed) ? parsed : [];
 }
 
 function ensureStats(value) {
   const parsed = ensureObject(value);
   return Object.fromEntries(
-    Object.entries(parsed).map(([key, stat]) => [key, Number(stat) || 0])
+    Object.entries(parsed).map(([key, stat]) => [key, Number(deepNormalize(stat)) || 0])
   );
 }
 
 function formatInlineValue(value) {
-  const parsed = tryParseJson(value);
+  const parsed = deepNormalize(value);
   if (parsed == null) return '';
   if (typeof parsed === 'string') return parsed;
   if (typeof parsed === 'number' || typeof parsed === 'boolean') return String(parsed);
   if (Array.isArray(parsed)) return parsed.map((item) => formatInlineValue(item)).filter(Boolean).join(', ');
   if (typeof parsed === 'object') return Object.entries(parsed).map(([k, v]) => `${startCase(k)}: ${formatInlineValue(v)}`).join(' | ');
   return String(parsed);
-}
-
-function renderObjectAsLines(value, indent = 0) {
-  const pad = ' '.repeat(indent);
-
-  if (Array.isArray(value)) {
-    return value.flatMap((item) => {
-      if (typeof item === 'object' && item !== null) {
-        return [`${pad}-`].concat(renderObjectAsLines(item, indent + 2));
-      }
-      return `${pad}- ${String(item)}`;
-    });
-  }
-
-  if (typeof value === 'object' && value !== null) {
-    return Object.entries(value).flatMap(([key, entry]) => {
-      if (typeof entry === 'object' && entry !== null) {
-        return [`${pad}${startCase(key)}:`].concat(renderObjectAsLines(entry, indent + 2));
-      }
-      return `${pad}${startCase(key)}: ${String(entry)}`;
-    });
-  }
-
-  return [`${pad}${String(value)}`];
 }
 
 function StatBlock({ stats }) {
@@ -217,12 +204,14 @@ function HiddenIntelPanel({ intel, team }) {
         </div>
       )}
 
-      {(safeIntel.awareness !== undefined || safeIntel.exploitPenalty !== undefined) && (
+      {(safeIntel.awareness !== undefined || safeIntel.exploitPenalty !== undefined || safeIntel.foothold !== undefined || safeIntel.objectivesConfidence !== undefined) && (
         <div>
           <div style={{ color: '#ffd66d', marginBottom: 6 }}>Operational State</div>
           <BulletList items={[
             safeIntel.awareness !== undefined ? `Awareness: ${formatInlineValue(safeIntel.awareness)}` : null,
-            safeIntel.exploitPenalty !== undefined ? `Exploit Penalty: ${formatInlineValue(safeIntel.exploitPenalty)}` : null
+            safeIntel.exploitPenalty !== undefined ? `Exploit Penalty: ${formatInlineValue(safeIntel.exploitPenalty)}` : null,
+            safeIntel.foothold !== undefined ? `Foothold: ${formatInlineValue(safeIntel.foothold)}` : null,
+            safeIntel.objectivesConfidence !== undefined ? `Objective Confidence: ${formatInlineValue(safeIntel.objectivesConfidence)}%` : null,
           ].filter(Boolean)} />
         </div>
       )}
@@ -234,6 +223,13 @@ function HiddenIntelPanel({ intel, team }) {
           <div>{formatInlineValue(safeIntel.actor.type)}</div>
           <div style={{ ...muted, marginTop: 6 }}>Motives: {formatInlineValue(safeIntel.actor.motives)}</div>
           <div style={muted}>Methodology: {formatInlineValue(safeIntel.actor.methodologies)}</div>
+        </div>
+      )}
+
+      {safeIntel.actorMotives && (
+        <div>
+          <div style={{ color: '#ffd66d', marginBottom: 4 }}>Adversary Motive Estimate</div>
+          <div style={muted}>{formatInlineValue(safeIntel.actorMotives)}</div>
         </div>
       )}
 
@@ -273,54 +269,41 @@ function CharacterSummary({ character, roleLabel }) {
 }
 
 function App() {
-  const [roles, setRoles] = useState(null);
-  const [auth, setAuth] = useState(null);
-  const [resumeChecked, setResumeChecked] = useState(false);
+  const [auth, setAuth] = useState(() => {
+    const stored = localStorage.getItem('cybersec_token');
+    return stored ? { token: stored } : null;
+  });
+  const [roles, setRoles] = useState({ blue: [], red: [] });
 
   useEffect(() => {
     fetch(`${API}/meta/roles`).then((r) => r.json()).then(setRoles);
   }, []);
 
-  useEffect(() => {
-    const token = localStorage.getItem('cybersec_token');
-    if (!token) return setResumeChecked(true);
-
-    fetch(`${API}/auth/session/${token}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.ok) setAuth({ user: data.user, token, resumed: true });
-        setResumeChecked(true);
-      })
-      .catch(() => setResumeChecked(true));
-  }, []);
-
-  if (!roles || !resumeChecked) return <div style={{ padding: 24 }}>Loading…</div>;
-  if (!auth) return <AuthScreen onAuthed={setAuth} />;
-  if (!auth.token) return <CharacterHub roles={roles} auth={auth} onJoined={setAuth} onLogout={() => { localStorage.removeItem('cybersec_token'); setAuth(null); }} />;
-  return <GameScreen auth={auth} onLeave={() => { localStorage.removeItem('cybersec_token'); setAuth({ user: auth.user }); }} />;
+  if (!auth?.token) return <AuthScreen roles={roles} onAuthed={setAuth} />;
+  if (!auth?.user) return <CharacterHub roles={roles} auth={auth} onJoined={setAuth} onLogout={() => { localStorage.removeItem('cybersec_token'); setAuth(null); }} />;
+  return <GameScreen auth={auth} onLeave={() => setAuth({ token: null })} />;
 }
 
-function AuthScreen({ onAuthed }) {
-  const [mode, setMode] = useState('login');
-  const [form, setForm] = useState({ username: '', password: '', displayName: '' });
+function AuthScreen({ roles, onAuthed }) {
+  const [mode, setMode] = useState('register');
+  const [form, setForm] = useState({ displayName: '', username: '', password: '' });
   const [error, setError] = useState('');
 
   async function submit(e) {
     e.preventDefault();
     setError('');
-    const url = mode === 'login' ? '/auth/login' : '/auth/register';
+    const url = mode === 'login' ? '/auth/register' : '/auth/register';
     const res = await fetch(`${API}${url}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form) });
     const data = await res.json();
-    if (!res.ok) return setError(data.error || 'Request failed');
-    if (mode === 'register') return setMode('login');
-    onAuthed({ user: data.user });
+    if (!res.ok) return setError(data.error || 'Authentication failed');
+    onAuthed(data);
   }
 
   return (
-    <div style={{ display: 'grid', placeItems: 'center', minHeight: '100%' }}>
-      <form onSubmit={submit} style={{ width: 540, maxWidth: '92vw', border: '1px solid #1d5034', background: '#07110c', padding: 24 }}>
-        <div style={{ color: '#68ff9d', fontSize: 28, letterSpacing: '0.18em', marginBottom: 8 }}>CYBERSEC OPS</div>
-        <div style={{ ...muted, marginBottom: 24 }}>Create an account, build multiple role-locked characters, then join a live room with reconnect-safe session recovery.</div>
+    <div style={{ display: 'grid', placeItems: 'center', minHeight: '100vh', padding: 24 }}>
+      <form onSubmit={submit} style={{ width: 420, border: '1px solid #1d5034', background: '#0d1913', padding: 24 }}>
+        <div style={{ color: '#68ff9d', fontSize: 28, marginBottom: 8 }}>CYBERSEC OPS</div>
+        <div style={{ ...muted, marginBottom: 20 }}>Create an account, build characters, and rejoin active rooms with reconnect-safe session recovery.</div>
         {mode === 'register' && <div style={{ marginBottom: 12 }}><input placeholder="Display name" value={form.displayName} onChange={(e) => setForm({ ...form, displayName: e.target.value })} style={inputStyle} /></div>}
         <div style={{ marginBottom: 12 }}><input placeholder="Username" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} style={inputStyle} /></div>
         <div style={{ marginBottom: 12 }}><input type="password" placeholder="Password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} style={inputStyle} /></div>
@@ -364,7 +347,7 @@ function CharacterHub({ roles, auth, onJoined, onLogout }) {
             {characters.length === 0 && <div style={muted}>No characters yet. Create one to continue.</div>}
             {characters.map((c) => (
               <div key={c.id}>
-                <CharacterSummary character={c} roleLabel={roles[c.team].find((r) => r.key === c.roleKey)?.role} />
+                <CharacterSummary character={c} roleLabel={roles[c.team]?.find((r) => r.key === c.roleKey)?.role} />
                 <button style={{ ...buttonStyle, marginBottom: 12 }} onClick={() => joinCharacter(c.id)}>Select Character and Join Room</button>
               </div>
             ))}
@@ -398,7 +381,7 @@ function CharacterBuilder({ userId, roles, onCreated }) {
   const [generateBio, setGenerateBio] = useState(true);
   const [error, setError] = useState('');
 
-  const role = roles[team].find((r) => r.key === roleKey);
+  const role = roles[team]?.find((r) => r.key === roleKey) || { skills: [], statPoints: 10, role: '' };
 
   useEffect(() => {
     const base = {};
@@ -437,7 +420,7 @@ function CharacterBuilder({ userId, roles, onCreated }) {
             <option value="red">Red Team</option>
           </select>
           <select style={inputStyle} value={roleKey} onChange={(e) => setRoleKey(e.target.value)}>
-            {roles[team].map((r) => <option key={r.key} value={r.key}>{r.role}</option>)}
+            {(roles[team] || []).map((r) => <option key={r.key} value={r.key}>{r.role}</option>)}
           </select>
         </div>
         <div style={{ marginTop: 12, color: '#68ff9d' }}>{role.role}</div>
@@ -462,6 +445,64 @@ function CharacterBuilder({ userId, roles, onCreated }) {
   );
 }
 
+function formatStatusLines(view) {
+  return [
+    `Room: ${view?.roomId || '-'}`,
+    `Round: ${view?.round ?? '-'}`,
+    `Phase: ${String(view?.phase || '-').toUpperCase()}`,
+    `Player: ${view?.player?.name || '-'}`,
+    `Role: ${view?.player?.role || '-'}`,
+    `Team: ${String(view?.player?.team || '-').toUpperCase()}`,
+  ].join('\n');
+}
+
+function formatSkillsLines(stats) {
+  const entries = Object.entries(ensureStats(stats));
+  if (!entries.length) return 'No stats available.';
+  return entries.map(([skill, value]) => `${startCase(skill)}: +${value}`).join('\n');
+}
+
+function formatIntelLines(intel, team) {
+  const safeIntel = ensureObject(intel);
+  const lines = [];
+  if (safeIntel.title) lines.push(`Scenario: ${formatInlineValue(safeIntel.title)}`);
+  if (safeIntel.setting) lines.push(`Setting: ${formatInlineValue(safeIntel.setting)}`);
+  if (safeIntel.business) lines.push(`Business: ${formatInlineValue(safeIntel.business)}`);
+  if (safeIntel.dayToDay) lines.push(`Day-to-Day: ${formatInlineValue(safeIntel.dayToDay)}`);
+  if (safeIntel.objectives) {
+    lines.push(team === 'red' ? 'Likely Objectives:' : 'Protected Objectives:');
+    ensureArray(safeIntel.objectives).forEach((item) => lines.push(`- ${formatInlineValue(item)}`));
+  }
+  const hints = safeIntel.hiddenHints || safeIntel.hints;
+  if (hints) {
+    lines.push(team === 'red' ? 'Operational Clues:' : 'Hidden Risk Hints:');
+    ensureArray(hints).forEach((item) => lines.push(`- ${formatInlineValue(item)}`));
+  }
+  if (safeIntel.attackSurfacePressure) lines.push(`Pressure: ${formatInlineValue(safeIntel.attackSurfacePressure)}`);
+  if (safeIntel.awareness !== undefined) lines.push(`Awareness: ${formatInlineValue(safeIntel.awareness)}`);
+  if (safeIntel.exploitPenalty !== undefined) lines.push(`Exploit Penalty: ${formatInlineValue(safeIntel.exploitPenalty)}`);
+  if (safeIntel.discovered) {
+    lines.push('Discovered Intel:');
+    ensureArray(safeIntel.discovered).forEach((item) => lines.push(`- ${formatInlineValue(item)}`));
+  }
+  if (safeIntel.objectivesConfidence !== undefined) lines.push(`Objective Confidence: ${formatInlineValue(safeIntel.objectivesConfidence)}%`);
+  if (safeIntel.foothold !== undefined) lines.push(`Foothold: ${formatInlineValue(safeIntel.foothold)}`);
+  return lines.join('\n') || 'No intel available.';
+}
+
+function formatSubmitResponse(res) {
+  const safe = ensureObject(res);
+  if (safe.error) return `Error: ${formatInlineValue(safe.error)}`;
+  if (!safe.action) return 'Action submitted.';
+  const action = ensureObject(safe.action);
+  const result = ensureObject(action.result);
+  return [
+    `${formatInlineValue(action.actor)} submitted ${formatInlineValue(action.command)}`,
+    `Outcome: ${formatInlineValue(result.outcome)}`,
+    `Roll: ${formatInlineValue(result.die)} + ${formatInlineValue(result.modifier)} = ${formatInlineValue(result.total)} vs ${formatInlineValue(result.difficulty)}`,
+  ].join('\n');
+}
+
 function GameScreen({ auth, onLeave }) {
   const [view, setView] = useState(null);
   const [presence, setPresence] = useState([]);
@@ -478,7 +519,8 @@ function GameScreen({ auth, onLeave }) {
     socketRef.current = socket;
 
     socket.on('room:view', (payload) => {
-      const nextView = ensureObject(payload);
+      const normalized = deepNormalize(payload);
+      const nextView = ensureObject(normalized);
       nextView.player = ensureObject(nextView.player);
       nextView.player.stats = ensureStats(nextView.player.stats);
       nextView.commandSet = ensureObject(nextView.commandSet);
@@ -486,10 +528,11 @@ function GameScreen({ auth, onLeave }) {
       nextView.history = ensureArray(nextView.history);
       setView(nextView);
     });
-    socket.on('room:presence', (msg) => setPresence(msg.players));
+    socket.on('room:presence', (msg) => setPresence(ensureArray(msg.players)));
     socket.on('room:narration', (msg) => {
-      setNarrations((n) => [msg, ...n].slice(0, 5));
-      appendTerminal(msg.narration);
+      const normalized = deepNormalize(msg);
+      setNarrations((n) => [normalized, ...n].slice(0, 5));
+      appendTerminal(normalized.narration);
     });
     socket.on('room:event', (msg) => appendTerminal(`EVENT: ${msg.actor} submitted ${msg.command} -> ${msg.outcome}`));
 
@@ -501,7 +544,9 @@ function GameScreen({ auth, onLeave }) {
   }, [terminal]);
 
   function appendTerminal(text) {
-    setTerminal((t) => [...t, normalizeTerminalText(text)]);
+    const clean = normalizeTerminalText(text);
+    if (!clean) return;
+    setTerminal((t) => [...t, clean]);
   }
 
   function runCommand(raw) {
@@ -526,23 +571,10 @@ function GameScreen({ auth, onLeave }) {
       'leave'
     ].join('\n'));
 
-    if (cmd === 'status') {
-      const lines = renderObjectAsLines({ round: view?.round, phase: view?.phase, me: view?.player?.name, roomId: view?.roomId });
-      return appendTerminal(lines.join('\n'));
-    }
-
-    if (cmd === 'intel') {
-      const intel = ensureObject(view?.visibleIntel);
-      const lines = renderObjectAsLines(intel);
-      return appendTerminal(lines.join('\n'));
-    }
-
-    if (cmd === 'roles') return appendTerminal(Object.keys(view?.commandSet || {}).join('\n'));
-
-    if (cmd === 'skills') {
-      const lines = renderObjectAsLines(ensureStats(view?.player?.stats));
-      return appendTerminal(lines.join('\n'));
-    }
+    if (cmd === 'status') return appendTerminal(formatStatusLines(view));
+    if (cmd === 'intel') return appendTerminal(formatIntelLines(view?.visibleIntel, view?.player?.team));
+    if (cmd === 'roles') return appendTerminal(Object.keys(view?.commandSet || {}).join('\n') || 'No commands available.');
+    if (cmd === 'skills') return appendTerminal(formatSkillsLines(view?.player?.stats));
 
     if (cmd === 'history') {
       const text = (view?.history || []).map((entry) => `Round ${entry.round} ${String(entry.phase).toUpperCase()}\n${normalizeTerminalText(entry.narration)}`).join('\n\n---\n\n') || 'No history yet';
@@ -555,8 +587,7 @@ function GameScreen({ auth, onLeave }) {
 
     if (cmd === 'submit') {
       return socketRef.current.emit('command:submit', { command: rest.join(' ') }, (res) => {
-        const lines = renderObjectAsLines(res || {});
-        appendTerminal(lines.join('\n'));
+        appendTerminal(formatSubmitResponse(res));
       });
     }
 
@@ -622,16 +653,14 @@ function GameScreen({ auth, onLeave }) {
           <div>Team: {view.player.team}</div>
         </>)}
 
-        {panel('Character', <>
-          <StatBlock stats={ensureStats(view.player.stats)} />
-          <div style={{ ...muted, marginTop: 12 }}>{view.player.bio}</div>
-        </>)}
+        {panel('Role Stats', <StatBlock stats={view.player.stats} />)}
+        {panel('Character Bio', <div style={muted}>{view.player.bio || 'No bio available for this character.'}</div>)}
 
         {panel('Presence', <div style={{ display: 'grid', gap: 8 }}>
           {presence.map((p) => (
             <div key={p.id} style={{ border: '1px solid #1d5034', background: '#112218', padding: '8px 10px' }}>
               <div style={{ color: '#68ff9d' }}>{p.name}</div>
-              <div style={muted}>{String(p.team).toUpperCase()} · {startCase(p.roleKey)} · {p.connected ? 'online' : 'offline'}</div>
+              <div style={muted}>{String(p.team).toUpperCase()} · {startCase(p.roleKey)} · {p.connected === false ? 'offline' : 'online'}</div>
             </div>
           ))}
         </div>)}
@@ -651,7 +680,7 @@ function GameScreen({ auth, onLeave }) {
       </main>
 
       <aside style={{ borderLeft: '1px solid #1d5034', background: 'linear-gradient(#06100b, #091711)', padding: 16 }}>
-        {panel('Hidden Intel View', <HiddenIntelPanel intel={ensureObject(view.visibleIntel)} team={view.player.team} />)}
+        {panel('Hidden Intel View', <HiddenIntelPanel intel={view.visibleIntel} team={view.player.team} />)}
         {panel('Available Commands', <ChipList items={Object.keys(view.commandSet || {})} />)}
         {panel('Narrations', <div style={{ display: 'grid', gap: 10 }}>
           {narrations.length === 0 && <div style={muted}>No completed narrated phase yet.</div>}
