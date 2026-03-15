@@ -32,6 +32,48 @@ function normalizeTerminalText(text) {
     .replace(/`([^`]+)`/g, '$1');
 }
 
+function tryParseJson(value) {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  const looksLikeJson =
+    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+    (trimmed.startsWith('[') && trimmed.endsWith(']'));
+  if (!looksLikeJson) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
+function ensureObject(value) {
+  const parsed = tryParseJson(value);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+}
+
+function ensureArray(value) {
+  const parsed = tryParseJson(value);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function ensureStats(value) {
+  const parsed = ensureObject(value);
+  return Object.fromEntries(
+    Object.entries(parsed).map(([key, stat]) => [key, Number(stat) || 0])
+  );
+}
+
+function formatInlineValue(value) {
+  const parsed = tryParseJson(value);
+  if (parsed == null) return '';
+  if (typeof parsed === 'string') return parsed;
+  if (typeof parsed === 'number' || typeof parsed === 'boolean') return String(parsed);
+  if (Array.isArray(parsed)) return parsed.map((item) => formatInlineValue(item)).filter(Boolean).join(', ');
+  if (typeof parsed === 'object') return Object.entries(parsed).map(([k, v]) => `${startCase(k)}: ${formatInlineValue(v)}`).join(' | ');
+  return String(parsed);
+}
+
 function renderObjectAsLines(value, indent = 0) {
   const pad = ' '.repeat(indent);
 
@@ -57,7 +99,7 @@ function renderObjectAsLines(value, indent = 0) {
 }
 
 function StatBlock({ stats }) {
-  const entries = Object.entries(stats || {});
+  const entries = Object.entries(ensureStats(stats));
   if (!entries.length) return <div style={muted}>No skill stats assigned yet.</div>;
 
   return (
@@ -73,10 +115,11 @@ function StatBlock({ stats }) {
 }
 
 function ChipList({ items }) {
-  if (!items?.length) return <div style={muted}>None listed.</div>;
+  const safeItems = ensureArray(items).map((item) => formatInlineValue(item)).filter(Boolean);
+  if (!safeItems.length) return <div style={muted}>None listed.</div>;
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-      {items.map((item) => (
+      {safeItems.map((item) => (
         <span key={item} style={{ border: '1px solid #1d5034', background: '#0f2318', padding: '6px 10px', fontSize: 12, color: '#68ff9d' }}>{item}</span>
       ))}
     </div>
@@ -84,108 +127,134 @@ function ChipList({ items }) {
 }
 
 function BulletList({ items }) {
-  if (!items?.length) return <div style={muted}>No items available.</div>;
+  const safeItems = ensureArray(items).map((item) => formatInlineValue(item)).filter(Boolean);
+  if (!safeItems.length) return <div style={muted}>No items available.</div>;
   return (
     <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
-      {items.map((item) => <li key={item}>{item}</li>)}
+      {safeItems.map((item) => <li key={item}>{item}</li>)}
     </ul>
   );
 }
 
 function HiddenIntelPanel({ intel, team }) {
-  if (!intel) return <div style={muted}>No intel available yet.</div>;
+  const safeIntel = ensureObject(intel);
+  if (!Object.keys(safeIntel).length) return <div style={muted}>No intel available yet.</div>;
 
   return (
     <div style={{ display: 'grid', gap: 14 }}>
       <div>
-        <div style={{ fontSize: 12, color: '#68ff9d', marginBottom: 4 }}>{team.toUpperCase()} PERSPECTIVE</div>
+        <div style={{ fontSize: 12, color: '#68ff9d', marginBottom: 4 }}>{String(team || '').toUpperCase()} PERSPECTIVE</div>
         <div style={muted}>This view is filtered for team-specific knowledge and hidden state.</div>
       </div>
 
-      {intel.business && (
+      {safeIntel.title && (
+        <div>
+          <div style={{ color: '#ffd66d', marginBottom: 4 }}>Scenario</div>
+          <div>{formatInlineValue(safeIntel.title)}</div>
+        </div>
+      )}
+
+      {safeIntel.business && (
         <div>
           <div style={{ color: '#ffd66d', marginBottom: 4 }}>Business Context</div>
-          <div style={muted}>{intel.business}</div>
+          <div style={muted}>{formatInlineValue(safeIntel.business)}</div>
         </div>
       )}
 
-      {intel.dayToDay && (
+      {safeIntel.dayToDay && (
         <div>
           <div style={{ color: '#ffd66d', marginBottom: 4 }}>Day-to-Day Operations</div>
-          <div style={muted}>{intel.dayToDay}</div>
+          <div style={muted}>{formatInlineValue(safeIntel.dayToDay)}</div>
         </div>
       )}
 
-      {intel.setting && (
+      {safeIntel.setting && (
         <div>
           <div style={{ color: '#ffd66d', marginBottom: 4 }}>Current Time and Setting</div>
-          <div>{intel.setting}</div>
+          <div>{formatInlineValue(safeIntel.setting)}</div>
         </div>
       )}
 
-      {intel.timePressure && (
+      {safeIntel.timePressure && (
         <div>
           <div style={{ color: '#ffd66d', marginBottom: 4 }}>Operational Pressure</div>
-          <div style={muted}>{intel.timePressure}</div>
+          <div style={muted}>{formatInlineValue(safeIntel.timePressure)}</div>
         </div>
       )}
 
-      {intel.assets && (
+      {(safeIntel.assets || safeIntel.coreAssets) && (
         <div>
           <div style={{ color: '#ffd66d', marginBottom: 6 }}>Core Assets</div>
-          <ChipList items={intel.assets} />
+          <ChipList items={safeIntel.assets || safeIntel.coreAssets} />
         </div>
       )}
 
-      {intel.objectives && (
+      {safeIntel.objectives && (
         <div>
-          <div style={{ color: '#ffd66d', marginBottom: 6 }}>Protected Objectives</div>
-          <BulletList items={intel.objectives} />
+          <div style={{ color: '#ffd66d', marginBottom: 6 }}>{team === 'red' ? 'Likely Objectives' : 'Protected Objectives'}</div>
+          <BulletList items={safeIntel.objectives} />
         </div>
       )}
 
-      {intel.hiddenHints && (
+      {(safeIntel.hiddenHints || safeIntel.hints) && (
         <div>
-          <div style={{ color: '#ffd66d', marginBottom: 6 }}>Hidden Risk Hints</div>
-          <BulletList items={intel.hiddenHints} />
+          <div style={{ color: '#ffd66d', marginBottom: 6 }}>{team === 'red' ? 'Operational Clues' : 'Hidden Risk Hints'}</div>
+          <BulletList items={safeIntel.hiddenHints || safeIntel.hints} />
         </div>
       )}
 
-      {intel.currentAssessment && (
+      {safeIntel.currentAssessment && (
         <div>
           <div style={{ color: '#ffd66d', marginBottom: 6 }}>Current Assessment</div>
-          <BulletList items={intel.currentAssessment} />
+          <BulletList items={safeIntel.currentAssessment} />
         </div>
       )}
 
-      {intel.actor && (
+      {safeIntel.attackSurfacePressure && (
+        <div>
+          <div style={{ color: '#ffd66d', marginBottom: 4 }}>Attack Surface Pressure</div>
+          <div style={muted}>{formatInlineValue(safeIntel.attackSurfacePressure)}</div>
+        </div>
+      )}
+
+      {(safeIntel.awareness !== undefined || safeIntel.exploitPenalty !== undefined) && (
+        <div>
+          <div style={{ color: '#ffd66d', marginBottom: 6 }}>Operational State</div>
+          <BulletList items={[
+            safeIntel.awareness !== undefined ? `Awareness: ${formatInlineValue(safeIntel.awareness)}` : null,
+            safeIntel.exploitPenalty !== undefined ? `Exploit Penalty: ${formatInlineValue(safeIntel.exploitPenalty)}` : null
+          ].filter(Boolean)} />
+        </div>
+      )}
+
+      {safeIntel.actor && (
         <div>
           <div style={{ color: '#ffd66d', marginBottom: 6 }}>Threat Actor</div>
-          <div style={{ color: '#68ff9d', fontWeight: 700 }}>{intel.actor.name}</div>
-          <div>{intel.actor.type}</div>
-          <div style={{ ...muted, marginTop: 6 }}>Motives: {intel.actor.motives?.join(', ')}</div>
-          <div style={muted}>Methodology: {intel.actor.methodologies?.join(', ')}</div>
+          <div style={{ color: '#68ff9d', fontWeight: 700 }}>{formatInlineValue(safeIntel.actor.name)}</div>
+          <div>{formatInlineValue(safeIntel.actor.type)}</div>
+          <div style={{ ...muted, marginTop: 6 }}>Motives: {formatInlineValue(safeIntel.actor.motives)}</div>
+          <div style={muted}>Methodology: {formatInlineValue(safeIntel.actor.methodologies)}</div>
         </div>
       )}
 
-      {intel.discovered && (
+      {safeIntel.discovered && (
         <div>
           <div style={{ color: '#ffd66d', marginBottom: 6 }}>Discovered Intel</div>
-          <BulletList items={intel.discovered} />
+          <BulletList items={safeIntel.discovered} />
         </div>
       )}
 
-      {intel.chain && (
+      {safeIntel.chain && (
         <div>
           <div style={{ color: '#ffd66d', marginBottom: 6 }}>Likely ATT&CK Path</div>
-          <BulletList items={intel.chain} />
+          <BulletList items={safeIntel.chain} />
         </div>
       )}
 
-      {intel.strategicGuess && (
+      {safeIntel.strategicGuess && (
         <div>
           <div style={{ color: '#ffd66d', marginBottom: 4 }}>Strategic Guess</div>
-          <div>{intel.strategicGuess}</div>
+          <div>{formatInlineValue(safeIntel.strategicGuess)}</div>
         </div>
       )}
     </div>
@@ -408,7 +477,15 @@ function GameScreen({ auth, onLeave }) {
     const socket = io(API, { auth: { token: auth.token } });
     socketRef.current = socket;
 
-    socket.on('room:view', setView);
+    socket.on('room:view', (payload) => {
+      const nextView = ensureObject(payload);
+      nextView.player = ensureObject(nextView.player);
+      nextView.player.stats = ensureStats(nextView.player.stats);
+      nextView.commandSet = ensureObject(nextView.commandSet);
+      nextView.visibleIntel = ensureObject(nextView.visibleIntel);
+      nextView.history = ensureArray(nextView.history);
+      setView(nextView);
+    });
     socket.on('room:presence', (msg) => setPresence(msg.players));
     socket.on('room:narration', (msg) => {
       setNarrations((n) => [msg, ...n].slice(0, 5));
@@ -455,7 +532,7 @@ function GameScreen({ auth, onLeave }) {
     }
 
     if (cmd === 'intel') {
-      const intel = view?.visibleIntel || {};
+      const intel = ensureObject(view?.visibleIntel);
       const lines = renderObjectAsLines(intel);
       return appendTerminal(lines.join('\n'));
     }
@@ -463,7 +540,7 @@ function GameScreen({ auth, onLeave }) {
     if (cmd === 'roles') return appendTerminal(Object.keys(view?.commandSet || {}).join('\n'));
 
     if (cmd === 'skills') {
-      const lines = renderObjectAsLines(view?.player?.stats || {});
+      const lines = renderObjectAsLines(ensureStats(view?.player?.stats));
       return appendTerminal(lines.join('\n'));
     }
 
@@ -546,7 +623,7 @@ function GameScreen({ auth, onLeave }) {
         </>)}
 
         {panel('Character', <>
-          <StatBlock stats={view.player.stats} />
+          <StatBlock stats={ensureStats(view.player.stats)} />
           <div style={{ ...muted, marginTop: 12 }}>{view.player.bio}</div>
         </>)}
 
@@ -574,7 +651,7 @@ function GameScreen({ auth, onLeave }) {
       </main>
 
       <aside style={{ borderLeft: '1px solid #1d5034', background: 'linear-gradient(#06100b, #091711)', padding: 16 }}>
-        {panel('Hidden Intel View', <HiddenIntelPanel intel={view.visibleIntel} team={view.player.team} />)}
+        {panel('Hidden Intel View', <HiddenIntelPanel intel={ensureObject(view.visibleIntel)} team={view.player.team} />)}
         {panel('Available Commands', <ChipList items={Object.keys(view.commandSet || {})} />)}
         {panel('Narrations', <div style={{ display: 'grid', gap: 10 }}>
           {narrations.length === 0 && <div style={muted}>No completed narrated phase yet.</div>}
